@@ -1,0 +1,77 @@
+# RESEARCH: actions/setup-java, actions/upload-artifact, Meta DAT Android sample.
+# DECISION: Reuse the existing Android sample and maintained build actions.
+# Only builds the standalone Android app; no JARVIS backend/frontend deployment.
+name: Android Camera APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: android-camera-apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: samples/CameraAccessAndroid
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Create configuration without embedded credentials
+        run: |
+          cat > app/src/main/java/com/meta/wearable/dat/externalsampleapps/cameraaccess/Secrets.kt <<'EOF'
+          package com.meta.wearable.dat.externalsampleapps.cameraaccess
+
+          object Secrets {
+              const val geminiAPIKey = ""
+              const val openClawHost = ""
+              const val openClawPort = 18789
+              const val openClawHookToken = ""
+              const val openClawGatewayToken = ""
+              const val webrtcSignalingURL = ""
+          }
+          EOF
+
+      - name: Build debug APK
+        env:
+          GITHUB_TOKEN: ${{ secrets.META_PACKAGES_TOKEN || github.token }}
+        run: bash ./gradlew --no-daemon --console=plain :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: VisionClaw-camera-debug
+          path: samples/CameraAccessAndroid/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Download instructions
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## APK listo
+          Descarga **VisionClaw-camera-debug** en Artifacts y extrae el ZIP.
+          Instala **app-debug.apk** en Android y abre **VisionClaw**.
+          Con Meta AI en modo desarrollador, usa Connect y acepta los permisos.
+          Este APK de prueba no incluye claves de IA ni servidores de streaming configurados.
+          Compilar correctamente no verifica la conexión física con tus lentes.
+          EOF
+
