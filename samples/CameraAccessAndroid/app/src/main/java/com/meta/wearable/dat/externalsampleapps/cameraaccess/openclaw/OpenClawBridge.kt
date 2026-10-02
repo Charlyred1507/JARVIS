@@ -20,159 +20,425 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class OpenClawBridge {
+
     companion object {
         private const val TAG = "OpenClawBridge"
         private const val MAX_HISTORY_TURNS = 10
+
+        // Explicit agent/model routing for OpenClaw
+        private const val OPENCLAW_AGENT_ID = "main"
+        private const val OPENCLAW_MODEL = "openclaw:main"
     }
 
-    private val _lastToolCallStatus = MutableStateFlow<ToolCallStatus>(ToolCallStatus.Idle)
-    val lastToolCallStatus: StateFlow<ToolCallStatus> = _lastToolCallStatus.asStateFlow()
+    private val _lastToolCallStatus =
+        MutableStateFlow<ToolCallStatus>(ToolCallStatus.Idle)
 
-    private val _connectionState = MutableStateFlow<OpenClawConnectionState>(OpenClawConnectionState.NotConfigured)
-    val connectionState: StateFlow<OpenClawConnectionState> = _connectionState.asStateFlow()
+    val lastToolCallStatus: StateFlow<ToolCallStatus> =
+        _lastToolCallStatus.asStateFlow()
+
+    private val _connectionState =
+        MutableStateFlow<OpenClawConnectionState>(
+            OpenClawConnectionState.NotConfigured
+        )
+
+    val connectionState: StateFlow<OpenClawConnectionState> =
+        _connectionState.asStateFlow()
 
     fun setToolCallStatus(status: ToolCallStatus) {
         _lastToolCallStatus.value = status
     }
 
-    private val client = OkHttpClient.Builder()
-        .readTimeout(120, TimeUnit.SECONDS)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val client =
+        OkHttpClient.Builder()
+            .readTimeout(120, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .build()
 
-    private val pingClient = OkHttpClient.Builder()
-        .readTimeout(5, TimeUnit.SECONDS)
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .build()
+    private val pingClient =
+        OkHttpClient.Builder()
+            .readTimeout(5, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .build()
 
     private var sessionKey: String = newSessionKey()
+
     private val conversationHistory = mutableListOf<JSONObject>()
 
-    suspend fun checkConnection() = withContext(Dispatchers.IO) {
-        if (!GeminiConfig.isOpenClawConfigured) {
-            _connectionState.value = OpenClawConnectionState.NotConfigured
-            return@withContext
-        }
-        _connectionState.value = OpenClawConnectionState.Checking
+    suspend fun checkConnection() =
+        withContext(Dispatchers.IO) {
 
-        val url = "${GeminiConfig.openClawHost}:${GeminiConfig.openClawPort}/v1/chat/completions"
-        try {
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .addHeader("Authorization", "Bearer ${GeminiConfig.openClawGatewayToken}")
-                .build()
-
-            val response = pingClient.newCall(request).execute()
-            val code = response.code
-            response.close()
-
-            if (code in 200..499) {
-                _connectionState.value = OpenClawConnectionState.Connected
-                Log.d(TAG, "Gateway reachable (HTTP $code)")
-            } else {
-                _connectionState.value = OpenClawConnectionState.Unreachable("Unexpected response")
+            if (!GeminiConfig.isOpenClawConfigured) {
+                _connectionState.value =
+                    OpenClawConnectionState.NotConfigured
+                return@withContext
             }
-        } catch (e: Exception) {
-            _connectionState.value = OpenClawConnectionState.Unreachable(e.message ?: "Unknown error")
-            Log.d(TAG, "Gateway unreachable: ${e.message}")
+
+            _connectionState.value =
+                OpenClawConnectionState.Checking
+
+            val url =
+                "${GeminiConfig.openClawHost}:${GeminiConfig.openClawPort}/v1/chat/completions"
+
+            try {
+
+                val request =
+                    Request.Builder()
+                        .url(url)
+                        .get()
+                        .addHeader(
+                            "Authorization",
+                            "Bearer ${GeminiConfig.openClawGatewayToken}"
+                        )
+                        .addHeader(
+                            "x-openclaw-agent-id",
+                            OPENCLAW_AGENT_ID
+                        )
+                        .build()
+
+                val response =
+                    pingClient
+                        .newCall(request)
+                        .execute()
+
+                val code = response.code
+
+                response.close()
+
+                if (code in 200..499) {
+
+                    _connectionState.value =
+                        OpenClawConnectionState.Connected
+
+                    Log.d(
+                        TAG,
+                        "Gateway reachable (HTTP $code)"
+                    )
+
+                } else {
+
+                    _connectionState.value =
+                        OpenClawConnectionState.Unreachable(
+                            "Unexpected response"
+                        )
+                }
+
+            } catch (e: Exception) {
+
+                _connectionState.value =
+                    OpenClawConnectionState.Unreachable(
+                        e.message ?: "Unknown error"
+                    )
+
+                Log.d(
+                    TAG,
+                    "Gateway unreachable: ${e.message}"
+                )
+            }
         }
-    }
 
     fun resetSession() {
+
         sessionKey = newSessionKey()
+
         conversationHistory.clear()
-        Log.d(TAG, "New session: $sessionKey")
+
+        Log.d(
+            TAG,
+            "New session: $sessionKey"
+        )
     }
 
     suspend fun delegateTask(
         task: String,
         toolName: String = "execute"
-    ): ToolResult = withContext(Dispatchers.IO) {
-        _lastToolCallStatus.value = ToolCallStatus.Executing(toolName)
+    ): ToolResult =
+        withContext(Dispatchers.IO) {
 
-        val url = "${GeminiConfig.openClawHost}:${GeminiConfig.openClawPort}/v1/chat/completions"
+            _lastToolCallStatus.value =
+                ToolCallStatus.Executing(toolName)
 
-        // Append user message
-        conversationHistory.add(JSONObject().apply {
-            put("role", "user")
-            put("content", task)
-        })
+            val url =
+                "${GeminiConfig.openClawHost}:${GeminiConfig.openClawPort}/v1/chat/completions"
 
-        // Trim history
-        if (conversationHistory.size > MAX_HISTORY_TURNS * 2) {
-            val trimmed = conversationHistory.takeLast(MAX_HISTORY_TURNS * 2)
-            conversationHistory.clear()
-            conversationHistory.addAll(trimmed)
+            /*
+             * Add user request to the OpenClaw conversation.
+             */
+            conversationHistory.add(
+
+                JSONObject().apply {
+
+                    put(
+                        "role",
+                        "user"
+                    )
+
+                    put(
+                        "content",
+                        task
+                    )
+                }
+            )
+
+            /*
+             * Prevent unlimited session history growth.
+             */
+            if (
+                conversationHistory.size >
+                MAX_HISTORY_TURNS * 2
+            ) {
+
+                val trimmed =
+                    conversationHistory.takeLast(
+                        MAX_HISTORY_TURNS * 2
+                    )
+
+                conversationHistory.clear()
+
+                conversationHistory.addAll(
+                    trimmed
+                )
+            }
+
+            Log.d(
+                TAG,
+                "Sending ${conversationHistory.size} messages in conversation"
+            )
+
+            try {
+
+                val messagesArray =
+                    JSONArray()
+
+                for (msg in conversationHistory) {
+                    messagesArray.put(msg)
+                }
+
+                /*
+                 * IMPORTANT:
+                 *
+                 * Route explicitly to the OpenClaw main agent.
+                 *
+                 * The old code used:
+                 *
+                 *     model = "openclaw"
+                 *
+                 * which did not reliably select the main agent.
+                 */
+                val body =
+                    JSONObject().apply {
+
+                        put(
+                            "model",
+                            OPENCLAW_MODEL
+                        )
+
+                        put(
+                            "messages",
+                            messagesArray
+                        )
+
+                        put(
+                            "stream",
+                            false
+                        )
+                    }
+
+                val request =
+                    Request.Builder()
+                        .url(url)
+                        .post(
+                            body
+                                .toString()
+                                .toRequestBody(
+                                    "application/json"
+                                        .toMediaType()
+                                )
+                        )
+                        .addHeader(
+                            "Authorization",
+                            "Bearer ${GeminiConfig.openClawGatewayToken}"
+                        )
+                        .addHeader(
+                            "Content-Type",
+                            "application/json"
+                        )
+                        .addHeader(
+                            "x-openclaw-agent-id",
+                            OPENCLAW_AGENT_ID
+                        )
+                        .addHeader(
+                            "x-openclaw-session-key",
+                            sessionKey
+                        )
+                        .build()
+
+                Log.d(
+                    TAG,
+                    "Sending request to agent=$OPENCLAW_AGENT_ID model=$OPENCLAW_MODEL"
+                )
+
+                val response =
+                    client
+                        .newCall(request)
+                        .execute()
+
+                val responseBody =
+                    response.body
+                        ?.string()
+                        ?: ""
+
+                val statusCode =
+                    response.code
+
+                response.close()
+
+                if (
+                    statusCode !in 200..299
+                ) {
+
+                    Log.d(
+                        TAG,
+                        "Chat failed: HTTP $statusCode - ${responseBody.take(500)}"
+                    )
+
+                    _lastToolCallStatus.value =
+                        ToolCallStatus.Failed(
+                            toolName,
+                            "HTTP $statusCode"
+                        )
+
+                    return@withContext ToolResult.Failure(
+                        "Agent returned HTTP $statusCode: ${responseBody.take(300)}"
+                    )
+                }
+
+                val json =
+                    JSONObject(responseBody)
+
+                val choices =
+                    json.optJSONArray(
+                        "choices"
+                    )
+
+                val content =
+                    choices
+                        ?.optJSONObject(0)
+                        ?.optJSONObject(
+                            "message"
+                        )
+                        ?.optString(
+                            "content",
+                            ""
+                        )
+
+                if (
+                    !content.isNullOrEmpty()
+                ) {
+
+                    conversationHistory.add(
+
+                        JSONObject().apply {
+
+                            put(
+                                "role",
+                                "assistant"
+                            )
+
+                            put(
+                                "content",
+                                content
+                            )
+                        }
+                    )
+
+                    Log.d(
+                        TAG,
+                        "Agent result: ${content.take(500)}"
+                    )
+
+                    _lastToolCallStatus.value =
+                        ToolCallStatus.Completed(
+                            toolName
+                        )
+
+                    return@withContext ToolResult.Success(
+                        content
+                    )
+                }
+
+                /*
+                 * Fallback:
+                 * preserve raw response if OpenClaw responds
+                 * with a slightly different OpenAI-compatible shape.
+                 */
+                conversationHistory.add(
+
+                    JSONObject().apply {
+
+                        put(
+                            "role",
+                            "assistant"
+                        )
+
+                        put(
+                            "content",
+                            responseBody
+                        )
+                    }
+                )
+
+                Log.d(
+                    TAG,
+                    "Agent raw: ${responseBody.take(500)}"
+                )
+
+                _lastToolCallStatus.value =
+                    ToolCallStatus.Completed(
+                        toolName
+                    )
+
+                return@withContext ToolResult.Success(
+                    responseBody
+                )
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    TAG,
+                    "Agent error: ${e.message}",
+                    e
+                )
+
+                _lastToolCallStatus.value =
+                    ToolCallStatus.Failed(
+                        toolName,
+                        e.message ?: "Unknown"
+                    )
+
+                return@withContext ToolResult.Failure(
+                    "Agent error: ${e.message}"
+                )
+            }
         }
-
-        Log.d(TAG, "Sending ${conversationHistory.size} messages in conversation")
-
-        try {
-            val messagesArray = JSONArray()
-            for (msg in conversationHistory) {
-                messagesArray.put(msg)
-            }
-
-            val body = JSONObject().apply {
-                put("model", "openclaw")
-                put("messages", messagesArray)
-                put("stream", false)
-            }
-
-            val request = Request.Builder()
-                .url(url)
-                .post(body.toString().toRequestBody("application/json".toMediaType()))
-                .addHeader("Authorization", "Bearer ${GeminiConfig.openClawGatewayToken}")
-                .addHeader("Content-Type", "application/json")
-                .addHeader("x-openclaw-session-key", sessionKey)
-                .build()
-
-            val response = client.newCall(request).execute()
-            val responseBody = response.body?.string() ?: ""
-            val statusCode = response.code
-            response.close()
-
-            if (statusCode !in 200..299) {
-                Log.d(TAG, "Chat failed: HTTP $statusCode - ${responseBody.take(200)}")
-                _lastToolCallStatus.value = ToolCallStatus.Failed(toolName, "HTTP $statusCode")
-                return@withContext ToolResult.Failure("Agent returned HTTP $statusCode")
-            }
-
-            val json = JSONObject(responseBody)
-            val choices = json.optJSONArray("choices")
-            val content = choices?.optJSONObject(0)
-                ?.optJSONObject("message")
-                ?.optString("content", "")
-
-            if (!content.isNullOrEmpty()) {
-                conversationHistory.add(JSONObject().apply {
-                    put("role", "assistant")
-                    put("content", content)
-                })
-                Log.d(TAG, "Agent result: ${content.take(200)}")
-                _lastToolCallStatus.value = ToolCallStatus.Completed(toolName)
-                return@withContext ToolResult.Success(content)
-            }
-
-            conversationHistory.add(JSONObject().apply {
-                put("role", "assistant")
-                put("content", responseBody)
-            })
-            Log.d(TAG, "Agent raw: ${responseBody.take(200)}")
-            _lastToolCallStatus.value = ToolCallStatus.Completed(toolName)
-            return@withContext ToolResult.Success(responseBody)
-        } catch (e: Exception) {
-            Log.e(TAG, "Agent error: ${e.message}")
-            _lastToolCallStatus.value = ToolCallStatus.Failed(toolName, e.message ?: "Unknown")
-            return@withContext ToolResult.Failure("Agent error: ${e.message}")
-        }
-    }
 
     private fun newSessionKey(): String {
-        val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
-        formatter.timeZone = TimeZone.getTimeZone("UTC")
-        val ts = formatter.format(Date())
+
+        val formatter =
+            SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                Locale.US
+            )
+
+        formatter.timeZone =
+            TimeZone.getTimeZone(
+                "UTC"
+            )
+
+        val ts =
+            formatter.format(
+                Date()
+            )
+
         return "agent:main:glass:$ts"
     }
 }
